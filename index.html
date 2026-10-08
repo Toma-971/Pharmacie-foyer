@@ -224,7 +224,7 @@ function sanitize(s){
   const meds=arr(s.meds).map(m=>({
     id:String(m.id),name:String(m.name||'Sans nom'),cip13:String(m.cip13||''),perBox:Number(m.perBox)||0,
     countedAt:/^\d{4}-\d{2}-\d{2}$/.test(m.countedAt||'')?m.countedAt:todayStr(),
-    batches:arr(m.batches).map(b=>({id:String(b.id),lot:String(b.lot||''),expiry:String(b.expiry||''),units:Math.max(0,Number(b.units)||0)}))
+    batches:arr(m.batches).map(b=>({id:String(b.id),lot:String(b.lot||''),expiry:String(b.expiry||''),units:Math.max(0,Number(b.units)||0),brand:String(b.brand||'')}))
   }));
   const scripts=arr(s.scripts).map(x=>({
     id:String(x.id),memberId:String(x.memberId||''),date:/^\d{4}-\d{2}-\d{2}$/.test(x.date||'')?x.date:todayStr(),
@@ -309,7 +309,9 @@ function analyse(){
     const med=state.meds.find(m=>m.id===id);
     if(!med)return;
     const have=usable(med);
-    const item={med:med,need:e.need,have:have,who:Array.from(e.who),until:e.until};
+    const est=estimate(med);
+    const expired=med.batches.filter(isExpired).reduce((a,b)=>a+(est.get(b.id)||0),0);
+    const item={med:med,need:e.need,have:have,expired:expired,who:Array.from(e.who),until:e.until};
     (have<e.need?short:covered).push(item);
   });
   const by=(a,b)=>a.med.name.localeCompare(b.med.name,'fr');
@@ -336,7 +338,129 @@ function expiryAlerts(){
 function findMed(name,cip){
   if(cip){const m=state.meds.find(x=>x.cip13===cip);if(m)return m;}
   const k=nameKey(name);
-  return k?state.meds.find(x=>nameKey(x.name)===k):undefined;
+  if(!k)return undefined;
+  const exact=state.meds.find(x=>nameKey(x.name)===k);
+  if(exact)return exact;
+  const sk=substKey(name,cip);
+  return sk?state.meds.find(x=>medKey(x)===sk):undefined;
+}
+
+/* ---------- Même substance, même dosage = même médicament ---------- */
+/* « Doliprane 1000 mg », « Paracétamol Biogaran 1 g » et « Paracétamol 1000 mg »
+   donnent la même clé : la marque ne sépare pas le stock. */
+const LABS=['biogaran','mylan','viatris','sandoz','teva','arrow','eg','zentiva','cristers','zydus','sun','ranbaxy','accord','almus',
+  'evolugen','ratiopharm','qualimed','actavis','bgr','substipharm','krka','aurobindo','alter','winthrop','reddy','reddys','dr','torrent',
+  'stada','tvm','bluefish','isomed','medisol','panpharma','ggam','gnr','qualihealth','pharma','lab','labs','laboratoire','laboratoires',
+  'conseil','arrow generiques','generiques','generique','ivax','upsa','sanofi','pfizer','mylan pharma','biogaran conseil','zf','h3','santé','sante',
+  'expanscience','cooper','gifrer','ranbaxy','sunpharma','fresenius','kabi','hospira','baxter','b braun','aguettant','renaudin','lavoisier','cooper'];
+const FORMS=['comprime','comprimes','cp','cpr','pellicule','pellicules','secable','secables','effervescent','effervescents','effervescente',
+  'orodispersible','orodispersibles','dispersible','dispersibles','gelule','gelules','capsule','capsules','molle','molles','dure','dures',
+  'enrobe','enrobes','sachet','sachets','sachetdose','poudre','pour','solution','suspension','buvable','en','a','de','du','des','la','le','l','et',
+  'boite','boites','bte','b','x','oral','orale','adulte','adultes','forme','croquer','sucer'];
+const LAB_RE=new RegExp('\\b(?:'+LABS.join('|')+')\\b','g');
+const FORM_SET=new Set(FORMS);
+function canonKey(text){
+  let t=norm(String(text||'').split(/,\s/)[0]).replace(/\u00b5/g,'u').replace(/\u00a0/g,' ');
+  t=t.replace(/\b(?:boite|bte|b)\s*(?:de|\/)?\s*\d+\b/g,' ').replace(/\bx\s*\d+\b/g,' ');
+  t=t.replace(LAB_RE,' ');
+  t=t.replace(/(\d)[ .](?=\d{3}(?!\d))/g,'$1');
+  t=t.replace(/(\d+(?:[.,]\d+)?)\s*(milligrammes?|mg|grammes?|g|microgrammes?|mcg|ug|ui|u\.i\.|ml|%)(?![a-z])/g,(a,n,u)=>{
+    let v=parseFloat(n.replace(',','.'));
+    if(/^(g|grammes?)$/.test(u)){v*=1000;u='mg';}
+    else if(/^(milligrammes?)$/.test(u))u='mg';
+    else if(/^(microgrammes?|mcg|ug)$/.test(u))u='ug';
+    else if(u==='u.i.')u='ui';
+    return ' '+String(Math.round(v*1000)/1000)+u+' ';
+  });
+  return t.split(/[^a-z0-9.%\/+]+/).filter(w=>w&&!FORM_SET.has(w)&&w!=='.').join(' ').replace(/\s*\/\s*/g,'/');
+}
+const stripUnits=k=>k.replace(/(\d)(mg|ug|ui|ml)\b/g,'$1');
+let aliasMap=null;
+const keyMemo=new Map();
+function buildAliases(db){
+  const votes=new Map();
+  const vote=(k,si,w)=>{if(!k)return;let v=votes.get(k);if(!v)votes.set(k,v=new Map());v.set(si,(v.get(si)||0)+w);};
+  const labelKey=db.s.map(l=>canonKey(l.split(', voie')[0]+(l.indexOf(', voie')>0?' '+l.split(', voie')[1]:'')));
+  db.n.forEach((n,i)=>{
+    const si=db.ns[i];if(!(si>=0))return;
+    const k=canonKey(prettyMedName(n));
+    vote(k,si,1);vote(stripUnits(k),si,1);
+  });
+  db.s.forEach((l,si)=>vote(labelKey[si],si,1000));
+  aliasMap=new Map();
+  votes.forEach((v,k)=>{
+    const arr=Array.from(v.entries()).sort((a,b)=>b[1]-a[1]);
+    const top=labelKey[arr[0][0]];
+    /* Clé ambiguë (plusieurs dosages possibles) : on ne regroupe pas. */
+    const rivals=arr.filter(e=>labelKey[e[0]]!==top);
+    if(rivals.length&&rivals[0][1]*3>arr[0][1])return;
+    aliasMap.set(k,arr[0][0]);
+  });
+  aliasMap.labelKey=labelKey;
+  keyMemo.clear();
+}
+/* Index de substance (dans db.s) d'un médicament, ou -1. */
+function substIndex(name,cip){
+  const db=bdpmDb;if(!db||!db.s||!db.ns)return -1;
+  if(cip&&db.c[cip]){const si=db.ns[db.c[cip][0]];if(si>=0)return si;}
+  if(!aliasMap)buildAliases(db);
+  const k=canonKey(name);
+  const si=aliasMap.get(k);
+  if(si>=0)return si;
+  const si2=aliasMap.get(stripUnits(k));
+  return si2>=0&&/\d/.test(k)?si2:-1;
+}
+function substKey(name,cip){
+  const memo=name+'|'+(cip||'');
+  if(keyMemo.has(memo))return keyMemo.get(memo);
+  const si=substIndex(name,cip);
+  const k=si>=0?aliasMap.labelKey[si]:canonKey(name);
+  keyMemo.set(memo,k);
+  return k;
+}
+const medKey=m=>substKey(m.name,m.cip13);
+function substLabel(name,cip){
+  const si=substIndex(name,cip);
+  return si>=0?bdpmDb.s[si]:'';
+}
+/* Rassemble les médicaments de même substance et dosage (anciennes données, imports). */
+function mergeSame(){
+  const groups=new Map();
+  for(const m of state.meds){
+    const k=medKey(m);if(!k)continue;
+    if(!groups.has(k))groups.set(k,[]);
+    groups.get(k).push(m);
+  }
+  const merged=[];
+  groups.forEach(g=>{
+    if(g.length<2)return;
+    settle();
+    const used=id=>state.scripts.some(s=>s.lines.some(l=>l.medId===id));
+    g.sort((a,b)=>(used(b.id)?1:0)-(used(a.id)?1:0));
+    const target=g[0];
+    for(const o of g.slice(1)){
+      for(const b of o.batches){if(!b.brand&&nameKey(o.name)!==nameKey(target.name))b.brand=o.name;target.batches.push(b);}
+      for(const s of state.scripts)for(const l of s.lines)if(l.medId===o.id)l.medId=target.id;
+      if(!target.perBox&&o.perBox)target.perBox=o.perBox;
+      if(!target.cip13&&o.cip13)target.cip13=o.cip13;
+      state.meds.splice(state.meds.indexOf(o),1);
+      openMeds.delete(o.id);
+    }
+    const names=g.map(m=>m.name);
+    renameToSubst(target,names);
+    merged.push(target.name);
+  });
+  return merged;
+}
+/* Plusieurs marques dans un même médicament : il prend le nom de la substance,
+   chaque lot garde sa marque. */
+function renameToSubst(med,names){
+  if(names.every(n=>nameKey(n)===nameKey(med.name)))return;
+  const lab=substLabel(med.name,med.cip13);
+  if(!lab||nameKey(lab)===nameKey(med.name))return;
+  for(const b of med.batches)if(!b.brand)b.brand=med.name;
+  med.name=lab;
+  keyMemo.clear();
 }
 
 /* ---------- Vues ---------- */
@@ -387,7 +511,9 @@ function viewNeed(){
         (it.who.length?'<span class="who">pour '+esc(it.who.join(', '))+'</span>':'')+'</div>'+
         strip(it.need,it.have)+
         '<p class="miss"><strong>Manque '+fmt(miss)+' '+pl(miss,'unité','unités')+'</strong>'+boxText+'.</p>'+
-        '<p class="muted">Il en faut encore '+fmt(it.need)+' jusqu\u2019au '+fmtDate(it.until)+', il en reste '+fmt(it.have)+'.</p></article>';
+        '<p class="muted">Il en faut encore '+fmt(it.need)+' jusqu\u2019au '+fmtDate(it.until)+', il en reste '+fmt(it.have)+'.'+
+        (it.expired>0?' <span class="bad">'+fmt(it.expired)+' '+pl(it.expired,'unité périmée','unités périmées')+' non '+pl(it.expired,'comptée','comptées')+'.</span>':'')+'</p>'+
+        brandsHtml(it.med)+'</article>';
     }
     h+='</div>';
   }
@@ -423,6 +549,11 @@ function viewNeed(){
   return h;
 }
 
+/* Rappelle que toute marque convient quand le stock en mélange plusieurs. */
+function brandsHtml(m){
+  const lab=substLabel(m.name,m.cip13);
+  return lab&&nameKey(lab)===nameKey(m.name)?'<p class="muted">Toute marque ou générique '+(/^[aeiouyhàâéèêîôû]/i.test(lab)?'d\u2019':'de ')+esc(lab.charAt(0).toLowerCase()+lab.slice(1))+' convient.</p>':'';
+}
 function batchHtml(m,b,u){
   let txt,cls='';
   if(!b.expiry){txt='Pas de date de péremption';}
@@ -433,7 +564,7 @@ function batchHtml(m,b,u){
     else txt='Périme le '+fmtDate(b.expiry);
   }
   const exp=cls==='bad';
-  return '<div class="batch'+(exp?' expired':'')+'"><div class="b-info"><span>'+(exp?'<b class="tag bad-tag">Périmé</b> ':cls==='warn'?'<b class="tag warn-tag">Bientôt</b> ':'')+(b.lot?'Lot '+esc(b.lot):'Sans numéro de lot')+'</span><span class="'+cls+'">'+esc(txt)+'</span></div>'+
+  return '<div class="batch'+(exp?' expired':'')+'"><div class="b-info"><span>'+(exp?'<b class="tag bad-tag">Périmé</b> ':cls==='warn'?'<b class="tag warn-tag">Bientôt</b> ':'')+(b.brand?esc(b.brand)+' · ':'')+(b.lot?'Lot '+esc(b.lot):'Sans numéro de lot')+'</span><span class="'+cls+'">'+esc(txt)+'</span></div>'+
     '<label class="b-units"><span class="sr">Unités restantes dans ce lot</span>'+
     '<input type="number" min="0" step="any" inputmode="decimal" value="'+esc(fmtNum(u))+'" data-batch="'+b.id+'" data-med="'+m.id+'"><span class="muted">unités</span></label>'+
     '<button class="linkbtn" data-act="del-batch" data-med="'+m.id+'" data-batch="'+b.id+'" data-confirm="Confirmer le retrait">Retirer</button></div>';
@@ -694,9 +825,10 @@ function parseCode(raw){
 
 /* ---------- Base publique des médicaments (code CIP -> nom, unités) ---------- */
 /* data/bdpm.json est reconstruit chaque mois par GitHub depuis la BDPM officielle. */
-let bdpmP=null;
+let bdpmP=null,bdpmDb=null;
 function loadBdpm(){
-  if(!bdpmP)bdpmP=fetch('data/bdpm.json').then(r=>{if(!r.ok)throw new Error(r.status);return r.json();}).catch(()=>{bdpmP=null;return null;});
+  if(!bdpmP)bdpmP=fetch('data/bdpm.json').then(r=>{if(!r.ok)throw new Error(r.status);return r.json();})
+    .then(db=>{bdpmDb=db;aliasMap=null;keyMemo.clear();return db;}).catch(()=>{bdpmP=null;return null;});
   return bdpmP;
 }
 /* « AMOXICILLINE BIOGARAN 500 mg, gélule » -> « Amoxicilline Biogaran 500 mg » */
@@ -1181,6 +1313,7 @@ function importData(file){
     const d=raw&&raw.app==='pharmacie-foyer'?raw.data:raw;
     if(!d||!Array.isArray(d.meds)||!Array.isArray(d.scripts)){toast('Ce fichier n\u2019est pas une sauvegarde de la pharmacie.');return;}
     state=sanitize(d);openMeds.clear();tab='need';
+    settle();if(bdpmDb)mergeSame();
     commit();toast('Sauvegarde restaurée : '+state.meds.length+' '+pl(state.meds.length,'médicament','médicaments')+', '+state.scripts.length+' '+pl(state.scripts.length,'ordonnance','ordonnances'));
   };
   rd.onerror=()=>toast('Ce fichier n\u2019a pas pu être lu.');
@@ -1208,12 +1341,15 @@ function saveBox(){
     med.perBox=perBox;
     if(cip&&!med.cip13)med.cip13=cip;
   }
+  /* Autre marque du même médicament : la boîte rejoint son stock, avec sa marque. */
+  const brand=nameKey(name)!==nameKey(med.name)?prettyMedName(name):'';
+  if(brand)renameToSubst(med,[med.name,name]);
   const units=unitsIn>0?unitsIn:perBox*boxes;
   const same=lot&&expiry?med.batches.find(b=>b.lot===lot&&b.expiry===expiry):null;
   if(same)same.units=(Number(same.units)||0)+units;
-  else med.batches.push({id:uid(),lot:lot,expiry:expiry,units:units});
+  else med.batches.push({id:uid(),lot:lot,expiry:expiry,units:units,brand:brand&&nameKey(brand)!==nameKey(med.name)?brand:''});
   closeSheet();
-  toast('Ajouté : '+fmt(units)+' '+pl(units,'unité','unités')+' de '+med.name);
+  toast('Ajouté : '+fmt(units)+' '+pl(units,'unité','unités')+' de '+med.name+(brand&&nameKey(brand)!==nameKey(med.name)?' ('+brand+')':''));
   commit();
 }
 
@@ -1246,6 +1382,7 @@ function saveScript(){
   const out=lines.map(l=>{
     let med=findMed(l.name,'');
     if(!med){med={id:uid(),name:l.name,cip13:'',perBox:0,countedAt:todayStr(),batches:[]};state.meds.push(med);}
+    else renameToSubst(med,[med.name,l.name]);
     return {medId:med.id,perDay:l.perDay,days:l.days};
   });
   state.scripts.push({id:uid(),memberId:memberId,date:$('#s-date').value||todayStr(),active:true,photo:pendingPhoto,lines:out});
@@ -1439,6 +1576,13 @@ if('serviceWorker' in navigator&&/^https?:$/.test(location.protocol)){
 try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist();}catch(e){}
 
 settle();persist();
+/* Au démarrage : regroupe les marques d'un même médicament dès que la base est chargée. */
+loadBdpm().then(db=>{
+  if(!db)return;
+  const merged=mergeSame();
+  if(merged.length){commit();toast('Regroupé par substance : '+merged.join(', ')+'. Chaque lot garde sa marque.');}
+  else if(tab==='need')render();
+});
 $('#today').textContent=new Date().toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long'});
 render();
 })();
