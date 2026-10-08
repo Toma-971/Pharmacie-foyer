@@ -1,6 +1,6 @@
 /* Mode hors connexion : l'appli est gardée en cache sur le téléphone.
    Changer VERSION à chaque mise à jour pour que les téléphones la récupèrent. */
-const VERSION='pharmacie-v6-1';
+const VERSION='pharmacie-v7-1';
 const SHELL=['./','index.html','manifest.webmanifest','icons/icon-192.png','icons/icon-512.png','icons/icon-maskable-512.png','icons/apple-touch-icon.png'];
 
 self.addEventListener('install',e=>{

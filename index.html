@@ -92,7 +92,14 @@ details.med>summary::-webkit-details-marker{display:none}
 details.med>summary::after{content:'';width:8px;height:8px;border-right:2px solid var(--ink2);border-bottom:2px solid var(--ink2);transform:rotate(45deg);margin:0 4px 4px 4px;flex:none}
 details.med[open]>summary::after{transform:rotate(225deg);margin-bottom:-2px}
 details.med .m-name{flex:1;font:600 1.08rem/1.25 var(--font-head)}
-details.med .m-qty{color:var(--ink2);white-space:nowrap}
+details.med .m-qty{color:var(--ink2);white-space:nowrap;text-align:right;line-height:1.3}
+.batch.expired{background:color-mix(in srgb,var(--miss) 9%,transparent);border-radius:10px;padding:10px;border-top-color:transparent;margin:4px 0}
+.tag{display:inline-block;font-size:.75rem;letter-spacing:.02em;text-transform:uppercase;padding:2px 7px;border-radius:6px;margin-right:4px;vertical-align:1px}
+.bad-tag{background:var(--miss);color:var(--surface)}
+.warn-tag{background:var(--warn);color:var(--surface)}
+.stock-alert{margin:14px 0 0;padding:12px 14px;border-radius:12px;border:1.5px solid var(--miss);color:var(--ink)}
+input.check{border-color:var(--warn)!important;border-width:2px}
+.exp-warn{margin:6px 0 0;font-size:.92rem}
 .med-body{padding:0 0 18px}
 .batch{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 12px;padding:10px 0;border-top:1px dashed var(--line)}
 .b-info{display:flex;flex-direction:column;flex:1 1 180px;font-size:.95rem}
@@ -421,11 +428,12 @@ function batchHtml(m,b,u){
   if(!b.expiry){txt='Pas de date de péremption';}
   else{
     const d=daysUntil(b.expiry);
-    if(d<0){txt='Périmé depuis le '+fmtDate(b.expiry);cls='bad';}
-    else if(d<=60){txt='Périme le '+fmtDate(b.expiry);cls='warn';}
+    if(d<0){txt='Périmé depuis le '+fmtDate(b.expiry)+' : à rapporter en pharmacie, non compté dans le stock';cls='bad';}
+    else if(d<=60){txt='Périme le '+fmtDate(b.expiry)+' (dans '+d+' '+pl(d,'jour','jours')+')';cls='warn';}
     else txt='Périme le '+fmtDate(b.expiry);
   }
-  return '<div class="batch"><div class="b-info"><span>'+(b.lot?'Lot '+esc(b.lot):'Sans numéro de lot')+'</span><span class="'+cls+'">'+esc(txt)+'</span></div>'+
+  const exp=cls==='bad';
+  return '<div class="batch'+(exp?' expired':'')+'"><div class="b-info"><span>'+(exp?'<b class="tag bad-tag">Périmé</b> ':cls==='warn'?'<b class="tag warn-tag">Bientôt</b> ':'')+(b.lot?'Lot '+esc(b.lot):'Sans numéro de lot')+'</span><span class="'+cls+'">'+esc(txt)+'</span></div>'+
     '<label class="b-units"><span class="sr">Unités restantes dans ce lot</span>'+
     '<input type="number" min="0" step="any" inputmode="decimal" value="'+esc(fmtNum(u))+'" data-batch="'+b.id+'" data-med="'+m.id+'"><span class="muted">unités</span></label>'+
     '<button class="linkbtn" data-act="del-batch" data-med="'+m.id+'" data-batch="'+b.id+'" data-confirm="Confirmer le retrait">Retirer</button></div>';
@@ -435,14 +443,18 @@ function viewStock(){
   let h='<h1 class="page-title">Stock</h1><button class="btn primary block" data-act="open-box">Ajouter une boîte</button>';
   if(!state.meds.length)return h+'<p class="empty">Le stock est vide. Scannez le code d\u2019une boîte ou saisissez-la à la main.</p>';
   const meds=state.meds.slice().sort((a,b)=>a.name.localeCompare(b.name,'fr'));
+  let nExp=0;
+  for(const m of meds){const e=estimate(m);nExp+=m.batches.filter(b=>isExpired(b)&&e.get(b.id)>0).length;}
+  if(nExp)h+='<p class="stock-alert"><b>'+nExp+' '+pl(nExp,'lot périmé','lots périmés')+'</b>, '+pl(nExp,'marqué','marqués')+' en rouge ci-dessous. Ces unités ne comptent pas dans le stock disponible : rapportez-les en pharmacie, puis touchez « Retirer ».</p>';
   h+='<div style="margin-top:18px">';
   for(const m of meds){
     const u=usable(m);
     const est=estimate(m);
+    const expU=m.batches.filter(isExpired).reduce((a,b)=>a+(est.get(b.id)||0),0);
     const taken=consumedSince(m,m.countedAt||todayStr());
     const batches=m.batches.slice().sort((a,b)=>(a.expiry||'9999').localeCompare(b.expiry||'9999'));
     h+='<details class="med" data-med="'+m.id+'"'+(openMeds.has(m.id)?' open':'')+'>'+
-      '<summary><span class="m-name">'+esc(m.name)+'</span><span class="m-qty">'+fmt(u)+' '+pl(u,'unité','unités')+'</span></summary>'+
+      '<summary><span class="m-name">'+esc(m.name)+'</span><span class="m-qty">'+fmt(u)+' '+pl(u,'unité','unités')+(expU>0?'<br><span class="bad">+ '+fmt(expU)+' '+pl(expU,'périmée','périmées')+'</span>':'')+'</span></summary>'+
       '<div class="med-body">'+
       '<p class="muted">'+(m.perBox>0?'Boîte de '+fmt(m.perBox)+' unités.':'Taille de boîte non renseignée.')+(m.cip13?' Code CIP '+esc(m.cip13)+'.':'')+'</p>'+
       (taken>0?'<p class="muted">Stock estimé : '+fmt(taken)+' '+pl(taken,'prise retirée','prises retirées')+' d\u2019après les ordonnances depuis le dernier comptage. Corrigez un nombre si le compte ne tombe pas juste.</p>':'')+
@@ -535,6 +547,28 @@ sheet.addEventListener('click',e=>{if(e.target===sheet)closeSheet();});
 function medNamesList(){
   return '<datalist id="medlist">'+state.meds.map(m=>'<option value="'+esc(m.name)+'"></option>').join('')+'</datalist>';
 }
+/* Suggestions pendant la saisie : médicaments du foyer, puis noms officiels de la BDPM. */
+let bdpmNames=null;
+async function suggestNames(input){
+  const q=norm(input.value).split(/[^a-z0-9]+/).filter(Boolean);
+  const dl=$('#medlist');if(!dl)return;
+  const home=state.meds.map(m=>m.name);
+  if(!q.length||q.join('').length<3){dl.innerHTML=home.map(n=>'<option value="'+esc(n)+'"></option>').join('');return;}
+  if(!bdpmNames){
+    const db=await loadBdpm();
+    if(db&&db.n){
+      const seen=new Set();bdpmNames=[];
+      for(const n of db.n){const p=prettyMedName(n);if(!seen.has(p)){seen.add(p);bdpmNames.push([p,norm(p).split(/[^a-z0-9]+/).filter(Boolean)]);}}
+    }else bdpmNames=[];
+  }
+  const hit=words=>q.every(w=>words.some(x=>x.indexOf(w)===0));
+  const out=home.filter(n=>hit(norm(n).split(/[^a-z0-9]+/)));
+  const more=[];
+  for(const [p,w] of bdpmNames){if(more.length>=300)break;if(out.indexOf(p)<0&&hit(w))more.push(p);}
+  more.sort((a,b)=>a.length-b.length||a.localeCompare(b,'fr'));
+  out.push(...more.slice(0,Math.max(0,20-out.length)));
+  if(input.isConnected)dl.innerHTML=out.map(n=>'<option value="'+esc(n)+'"></option>').join('');
+}
 
 function openBox(medId){
   const med=state.meds.find(m=>m.id===medId);
@@ -558,7 +592,7 @@ function openBox(medId){
     '</div>'+
     '<label class="field"><span>Unités ajoutées au stock</span><input id="f-units" type="number" min="0" step="any" inputmode="decimal" value="'+esc(med&&med.perBox?med.perBox:'')+'"><small class="muted">Calculé tout seul. Changez-le pour une boîte entamée.</small></label>'+
     '<div class="grid2">'+
-    '<label class="field"><span>Date de péremption</span><input id="f-exp" type="date"></label>'+
+    '<label class="field"><span>Date de péremption</span><input id="f-exp" type="date"><span class="exp-warn bad" id="expWarn" hidden></span></label>'+
     '<label class="field"><span>Numéro de lot</span><input id="f-lot" autocomplete="off"></label>'+
     '</div>'+
     '<p class="msg" id="formMsg" role="alert"></p>'+
@@ -633,20 +667,26 @@ function parseCode(raw){
     }
   };
   if(/^\d{13}$/.test(s)){out.cip13=s;return out;}
+  if(/^0\d{13}$/.test(s)){out.cip13=s.slice(1);return out;}
   if(/\(\d{2}\)/.test(s)){
     const re=/\((\d{2})\)([^(]*)/g;let m;
     while((m=re.exec(s)))set(m[1],m[2].trim());
   }else{
-    s=s.replace(/^\]d2/i,'');
+    // séparateur GS (FNC1) parfois rendu autrement selon le lecteur
+    s=s.replace(/^\]d2/i,'').replace(/<GS>|\u241D|\u001D/gi,'\x1d').replace(/^\x1d+/,'');
+    const FIXED={'00':18,'01':14,'02':14,'11':6,'12':6,'13':6,'15':6,'16':6,'17':6,'20':2};
     let i=0;
     while(i<s.length){
+      if(s[i]==='\x1d'){i++;continue;}
       const ai=s.slice(i,i+2);
-      if(ai==='01'){set(ai,s.slice(i+2,i+16));i+=16;}
-      else if(ai==='17'||ai==='11'||ai==='15'){set(ai,s.slice(i+2,i+8));i+=8;}
-      else if(ai==='10'||ai==='21'){
-        let j=s.indexOf('\x1d',i+2);if(j<0)j=s.length;
-        set(ai,s.slice(i+2,j));i=j+1;
-      }else break;
+      if(FIXED[ai]){set(ai,s.slice(i+2,i+2+FIXED[ai]));i+=2+FIXED[ai];continue;}
+      // champs de longueur variable (lot 10, série 21, 240, 241, 710 à 715, 30…) : jusqu'au GS
+      let len=0;
+      if(ai==='10'||ai==='21'||ai==='22'||ai==='30'||ai==='37')len=2;
+      else if(/^(24[01]|71[0-5]|25[0-4])$/.test(s.slice(i,i+3)))len=3;
+      else break;
+      let j=s.indexOf('\x1d',i+len);if(j<0)j=s.length;
+      set(s.slice(i,i+len),s.slice(i+len,j));i=j+1;
     }
   }
   return out;
@@ -687,6 +727,7 @@ async function applyCode(raw){
   sheet.dataset.cipSrc=r.cip13?'scan':'';
   if(r.expiry)$('#f-exp').value=r.expiry;
   if(r.lot)$('#f-lot').value=r.lot;
+  syncExpWarn();
   const got=[];
   if(r.expiry)got.push('la péremption');
   if(r.lot)got.push('le lot');
@@ -712,8 +753,17 @@ async function applyCode(raw){
       (list?'J\u2019ai rempli '+list+'. ':'')+
       (src.perBox?'':'Indiquez le nombre d\u2019unités par boîte. ')+'Vérifiez, corrigez si besoin, puis ajoutez au stock.';
   }else{
-    msg.textContent='Code lu'+(list?' : j\u2019ai rempli '+list:'')+'. Ce médicament n\u2019a pas été trouvé dans la base : indiquez son nom et le nombre d\u2019unités par boîte, ils seront retenus pour les prochains scans.';
+    msg.textContent='Code lu'+(r.cip13?' (CIP '+r.cip13+')':'')+(list?' : j\u2019ai rempli '+list:'')+'. Ce médicament n\u2019est pas dans la base publique : tapez son nom ci-dessous (des suggestions s\u2019affichent) et le nombre d\u2019unités par boîte. Ils seront retenus pour les prochains scans de cette boîte.';
+    const n=$('#f-name');
+    if(n){n.classList.add('check');n.focus({preventScroll:true});n.scrollIntoView({block:'center',behavior:'smooth'});}
+    const pb=$('#f-perbox');if(pb&&!pb.value)pb.classList.add('check');
   }
+}
+function syncExpWarn(){
+  const e=$('#f-exp'),w=$('#expWarn');if(!e||!w)return;
+  const v=e.value;
+  if(v&&daysUntil(v)<0){w.textContent='Boîte périmée depuis le '+fmtDate(v)+'. Elle sera enregistrée comme périmée et ne comptera pas dans le stock disponible.';w.hidden=false;}
+  else w.hidden=true;
 }
 /* Unités ajoutées au stock = unités par boîte × boîtes, sauf si on l'a changé à la main (boîte entamée). */
 function syncUnits(){
@@ -1349,7 +1399,9 @@ document.addEventListener('change',e=>{
 
 document.addEventListener('input',e=>{
   const t=e.target;
-  if(t.id==='f-perbox'||t.id==='f-boxes'){syncUnits();return;}
+  if(t.id==='f-perbox'||t.id==='f-boxes'){t.classList.remove('check');syncUnits();return;}
+  if(t.id==='f-exp'){syncExpWarn();return;}
+  if(t.id==='f-name'||(t.classList&&t.classList.contains('l-name'))){t.classList.remove('check');suggestNames(t);}
   if(t.id==='zoom'&&scanTrack){scanTrack.applyConstraints({advanced:[{zoom:Number(t.value)}]}).catch(()=>{});return;}
   if(t.id==='f-name'&&sheet.dataset.cipSrc!=='scan'){
     const m=findMed(t.value,'');
