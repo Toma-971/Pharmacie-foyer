@@ -120,7 +120,11 @@ input[type=file]{padding:10px 12px;height:auto}
 .msg{min-height:1.4em;color:var(--miss);font-weight:700;margin:10px 0 0}
 .info{color:var(--ink2);margin:10px 0}
 .scanbox{margin:12px 0}
-.scanbox video{width:100%;max-height:260px;object-fit:cover;border-radius:12px;background:#000}
+.scanbox video{display:block;width:100%;height:300px;object-fit:cover;border-radius:12px;background:#000}
+.cam-wrap{position:relative;cursor:pointer;overflow:hidden;border-radius:12px}
+.cam-frame{position:absolute;left:50%;top:50%;width:52%;aspect-ratio:1;max-height:88%;transform:translate(-50%,-50%);border:3px solid #fff;border-radius:14px;box-shadow:0 0 0 999px rgba(0,0,0,.35);pointer-events:none}
+.scan-btns{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:8px 0}
+.scan-btns .btn{padding:6px 10px;margin:0;line-height:1.15}
 .photo-btn{display:flex;align-items:center;justify-content:center;margin-top:8px}
 .photo-btn:focus-within{outline:3px solid var(--focus);outline-offset:2px}
 .line input.check{border-color:var(--warn);border-width:2px}
@@ -538,10 +542,15 @@ function openBox(medId){
   sheet.dataset.cipSrc=med&&med.cip13?'med':'';
   showSheet(
     '<div class="sheet-h"><h2>Ajouter une boîte</h2><button class="icon" data-act="close-sheet" aria-label="Fermer">\u00d7</button></div>'+
-    '<button class="btn block" data-act="scan">Scanner le code de la boîte</button>'+
-    '<div class="scanbox" hidden><video id="cam" playsinline muted></video><div class="row-actions"><button class="btn" data-act="stop-scan">Arrêter la caméra</button></div></div>'+
+    '<div class="scan-btns"><button class="btn primary" data-act="scan">Scanner le code</button>'+
+    '<label class="btn photo-btn"><input id="f-codephoto" type="file" accept="image/*" capture="environment" class="sr">Photographier le code</label></div>'+
+    '<p class="info" id="scanMsg" role="status">Le petit code carré de la boîte donne la péremption et le lot. Si la caméra ne fait pas le point, « Photographier le code » utilise l\u2019appareil photo du téléphone, plus précis.</p>'+
+    '<div class="scanbox" hidden><div class="cam-wrap" data-act="refocus"><video id="cam" playsinline muted></video><div class="cam-frame" aria-hidden="true"></div></div>'+
+    '<label class="field" id="zoomWrap" hidden><span>Zoom</span><input id="zoom" type="range" min="1" max="2" step="0.1"></label>'+
+    '<div class="row-actions"><button class="btn" data-act="stop-scan">Arrêter la caméra</button><button class="btn" id="torchBtn" data-act="torch" hidden>Allumer la lampe</button></div>'+
+    '<p class="muted">Image floue : touchez-la pour refaire la mise au point.</p></div>'+
     '<label class="field"><span>Ou tapez le code sous le carré (CIP à 13 chiffres ou code complet)</span><div class="scan-row"><input id="f-code" inputmode="numeric" autocomplete="off"><button class="btn" data-act="read-code">Lire</button></div></label>'+
-    '<p class="info" id="scanMsg" role="status"></p>'+
+
     '<label class="field"><span>Nom du médicament</span><input id="f-name" list="medlist" autocomplete="off" placeholder="Nom et dosage" value="'+esc(med?med.name:'')+'"></label>'+medNamesList()+
     '<div class="grid2">'+
     '<label class="field"><span>Unités par boîte</span><input id="f-perbox" type="number" min="1" step="1" inputmode="numeric" value="'+esc(med&&med.perBox?med.perBox:'')+'"></label>'+
@@ -663,46 +672,160 @@ function applyCode(raw){
     :'Code lu. Ce médicament est nouveau pour le foyer : indiquez son nom et le nombre d\u2019unités par boîte. Ils seront retenus pour les prochains scans.';
 }
 
-let stream=null,scanTimer=null;
+/* Décodage : le lecteur intégré au navigateur s'il sait lire le DataMatrix,
+   sinon zxing-wasm (hébergé avec l'appli, marche sur tous les téléphones). */
+let nativeDet=null,zxingReady=null;
+async function getDecoders(){
+  if(nativeDet===null){
+    nativeDet=false;
+    try{
+      if('BarcodeDetector' in window){
+        const sup=await window.BarcodeDetector.getSupportedFormats();
+        if(sup.indexOf('data_matrix')>=0)nativeDet=new window.BarcodeDetector({formats:['data_matrix','qr_code','ean_13','code_128'].filter(f=>sup.indexOf(f)>=0)});
+      }
+    }catch(e){nativeDet=false;}
+  }
+  if(!zxingReady){
+    zxingReady=loadScript('vendor/zxing/zxing-reader.js').then(()=>{
+      const wasm=new URL('vendor/zxing/zxing_reader.wasm',location.href).href;
+      window.ZXingWASM.prepareZXingModule({overrides:{locateFile:(path,prefix)=>path.endsWith('.wasm')?wasm:prefix+path},fireImmediately:true});
+      return window.ZXingWASM;
+    }).catch(e=>{zxingReady=null;throw e;});
+  }
+}
+async function decodeCanvas(c){
+  if(nativeDet){
+    try{const r=await nativeDet.detect(c);if(r.length&&r[0].rawValue)return r[0].rawValue;}catch(e){}
+  }
+  try{
+    const Z=await zxingReady;
+    const d=c.getContext('2d').getImageData(0,0,c.width,c.height);
+    const r=await Z.readBarcodes(d,{formats:['DataMatrix','QRCode','EAN-13','Code128'],tryHarder:true,tryRotate:true,tryInvert:false,maxNumberOfSymbols:1});
+    if(r.length&&r[0].text)return r[0].text;
+  }catch(e){}
+  return '';
+}
+/* Copie une zone (carré central ou image entière) dans un canevas de taille utile. */
+function cropTo(src,sw,sh,frac,target){
+  const side=Math.min(sw,sh)*frac;
+  const w=frac>=1?sw:side,h=frac>=1?sh:side;
+  const k=Math.min(1,target/Math.max(w,h))||1;
+  const c=document.createElement('canvas');
+  c.width=Math.max(1,Math.round(w*k));c.height=Math.max(1,Math.round(h*k));
+  c.getContext('2d',{willReadFrequently:true}).drawImage(src,(sw-w)/2,(sh-h)/2,w,h,0,0,c.width,c.height);
+  return c;
+}
+function codeFound(raw){
+  stopScan();
+  const inp=$('#f-code');if(inp)inp.value=raw;
+  try{if(navigator.vibrate)navigator.vibrate(80);}catch(e){}
+  applyCode(raw);
+}
+
+let stream=null,scanTimer=null,scanTrack=null,torchOn=false;
 async function startScan(){
   const msg=$('#scanMsg');
-  if(!('BarcodeDetector' in window)){
-    msg.textContent='Ce navigateur ne sait pas lire les codes. Essayez Chrome sur Android, ou saisissez la boîte à la main.';return;
-  }
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
-    msg.textContent='La caméra n\u2019est pas disponible ici. Saisissez la boîte à la main.';return;
+    msg.textContent='La caméra n’est pas disponible ici. Utilisez « Photographier le code » ou tapez le code.';return;
   }
-  let formats=['data_matrix','qr_code','ean_13','code_128'];
-  try{const sup=await window.BarcodeDetector.getSupportedFormats();formats=formats.filter(f=>sup.indexOf(f)>=0);}catch(e){}
-  if(!formats.length){msg.textContent='Ce navigateur ne sait pas lire ce type de code. Saisissez la boîte à la main.';return;}
-  const det=new window.BarcodeDetector({formats:formats});
+  stopScan();
+  msg.textContent='Ouverture de la caméra…';
+  try{await getDecoders();}catch(e){}
   try{
-    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
+    // haute résolution : le petit carré a besoin de pixels
+    stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080},advanced:[{focusMode:'continuous'}]}});
   }catch(e){
-    msg.textContent='La caméra n\u2019est pas accessible (autorisation refusée ou bloquée ici). Saisissez la boîte à la main.';return;
+    try{stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'}}});}
+    catch(e2){msg.textContent='La caméra n’est pas accessible (autorisation refusée ou bloquée ici). Utilisez « Photographier le code » ou tapez le code.';return;}
   }
   const v=$('#cam');
   if(!v){stopScan();return;}
+  scanTrack=stream.getVideoTracks()[0]||null;
+  await tuneCamera();
   v.srcObject=stream;
   try{await v.play();}catch(e){}
   $('.scanbox').hidden=false;
-  msg.textContent='Cadrez le petit code carré de la boîte.';
+  msg.textContent='Placez le petit carré dans le cadre, à 10 ou 15 cm. Si l’image reste floue, reculez un peu et zoomez.';
+  let busy=false,n=0;
   scanTimer=setInterval(async()=>{
+    if(busy||!v.videoWidth)return;
+    busy=true;
     try{
-      const r=await det.detect(v);
-      if(r.length){
-        const raw=r[0].rawValue;
-        stopScan();
-        const inp=$('#f-code');if(inp)inp.value=raw;
-        applyCode(raw);
-      }
+      // alterne : carré central agrandi (petits codes) puis image entière
+      const frac=[0.5,0.75,1][n++%3];
+      const raw=await decodeCanvas(cropTo(v,v.videoWidth,v.videoHeight,frac,frac<1?900:1280));
+      if(raw&&stream)codeFound(raw);
     }catch(e){}
-  },300);
+    busy=false;
+  },180);
+}
+/* Mise au point continue, zoom et lampe quand le téléphone les propose. */
+async function tuneCamera(){
+  const zoomWrap=$('#zoomWrap'),torchBtn=$('#torchBtn');
+  if(zoomWrap)zoomWrap.hidden=true;
+  if(torchBtn)torchBtn.hidden=true;
+  if(!scanTrack||!scanTrack.getCapabilities)return;
+  let caps={};try{caps=scanTrack.getCapabilities()||{};}catch(e){}
+  const adv={};
+  if(Array.isArray(caps.focusMode)&&caps.focusMode.indexOf('continuous')>=0)adv.focusMode='continuous';
+  if(caps.zoom&&caps.zoom.max>1){
+    // un léger zoom permet de tenir le téléphone plus loin, là où il fait la mise au point
+    adv.zoom=Math.min(caps.zoom.max,Math.max(caps.zoom.min||1,2));
+    const z=$('#zoom');
+    if(z&&zoomWrap){z.min=caps.zoom.min||1;z.max=caps.zoom.max;z.step=caps.zoom.step||0.1;z.value=adv.zoom;zoomWrap.hidden=false;}
+  }
+  if(caps.torch&&torchBtn){torchBtn.hidden=false;torchOn=false;torchBtn.textContent='Allumer la lampe';}
+  if(Object.keys(adv).length){try{await scanTrack.applyConstraints({advanced:[adv]});}catch(e){}}
+}
+/* Toucher l'image relance la mise au point. */
+async function refocus(){
+  if(!scanTrack||!scanTrack.getCapabilities)return;
+  let caps={};try{caps=scanTrack.getCapabilities()||{};}catch(e){}
+  const modes=Array.isArray(caps.focusMode)?caps.focusMode:[];
+  try{
+    if(modes.indexOf('single-shot')>=0){
+      await scanTrack.applyConstraints({advanced:[{focusMode:'single-shot',pointsOfInterest:[{x:0.5,y:0.5}]}]});
+      if(modes.indexOf('continuous')>=0)setTimeout(()=>{if(scanTrack)scanTrack.applyConstraints({advanced:[{focusMode:'continuous'}]}).catch(()=>{});},1200);
+    }else if(modes.indexOf('continuous')>=0){
+      await scanTrack.applyConstraints({advanced:[{focusMode:'manual'}]}).catch(()=>{});
+      await scanTrack.applyConstraints({advanced:[{focusMode:'continuous'}]});
+    }
+  }catch(e){}
+}
+async function toggleTorch(){
+  if(!scanTrack)return;
+  torchOn=!torchOn;
+  try{await scanTrack.applyConstraints({advanced:[{torch:torchOn}]});}catch(e){torchOn=false;}
+  const b=$('#torchBtn');if(b)b.textContent=torchOn?'Éteindre la lampe':'Allumer la lampe';
 }
 function stopScan(){
   if(scanTimer){clearInterval(scanTimer);scanTimer=null;}
   if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
+  scanTrack=null;torchOn=false;
   const b=$('.scanbox');if(b)b.hidden=true;
+}
+/* Photo prise avec l'appareil photo du téléphone (meilleure mise au point que la vidéo). */
+async function decodePhoto(file){
+  const msg=$('#scanMsg');if(!msg)return;
+  stopScan();
+  msg.textContent='Recherche du code sur la photo…';
+  try{await getDecoders();}catch(e){}
+  let bmp;
+  try{bmp=await loadImage(file);}catch(e){msg.textContent='Cette image n’a pas pu être lue.';return;}
+  const W=bmp.naturalWidth||bmp.width,H=bmp.naturalHeight||bmp.height;
+  for(const [frac,target] of [[1,2000],[0.6,1400],[0.35,1000],[1,3000],[0.2,800]]){
+    const raw=await decodeCanvas(cropTo(bmp,W,H,frac,target));
+    if(raw){if(msg.isConnected)codeFound(raw);return;}
+  }
+  if(msg.isConnected)msg.textContent='Code non trouvé sur la photo. Reprenez-la plus près, le petit carré bien net et au centre, ou tapez le code écrit à côté.';
+}
+function loadImage(file){
+  return new Promise((ok,ko)=>{
+    const url=URL.createObjectURL(file);const im=new Image();
+    im.onload=()=>{ok(im);setTimeout(()=>URL.revokeObjectURL(url),1000);};
+    im.onerror=()=>{URL.revokeObjectURL(url);ko(new Error('image'));};
+    im.src=url;
+  });
 }
 
 /* ---------- Lecture du texte d'une ordonnance ---------- */
@@ -1067,6 +1190,8 @@ function act(a,el){
     case 'close-sheet':closeSheet();break;
     case 'scan':startScan();break;
     case 'stop-scan':stopScan();break;
+    case 'refocus':refocus();break;
+    case 'torch':toggleTorch();break;
     case 'read-code':applyCode($('#f-code').value);break;
     case 'save-box':saveBox();break;
     case 'save-med':saveMed(d.med);break;
@@ -1159,6 +1284,10 @@ document.addEventListener('change',e=>{
     }).catch(()=>{toast('Cette image n\u2019a pas pu être lue.');});
     readPrescription(f);
   }
+  if(t.id==='f-codephoto'){
+    const f=t.files&&t.files[0];t.value='';
+    if(f)decodePhoto(f);
+  }
   if(t.id==='import-file'){
     const f=t.files&&t.files[0];t.value='';
     if(f)importData(f);
@@ -1167,6 +1296,7 @@ document.addEventListener('change',e=>{
 
 document.addEventListener('input',e=>{
   const t=e.target;
+  if(t.id==='zoom'&&scanTrack){scanTrack.applyConstraints({advanced:[{zoom:Number(t.value)}]}).catch(()=>{});return;}
   if(t.id==='f-name'&&sheet.dataset.cipSrc!=='scan'){
     const m=findMed(t.value,'');
     sheet.dataset.cip=m&&m.cip13?m.cip13:'';
