@@ -121,6 +121,10 @@ input[type=file]{padding:10px 12px;height:auto}
 .info{color:var(--ink2);margin:10px 0}
 .scanbox{margin:12px 0}
 .scanbox video{width:100%;max-height:260px;object-fit:cover;border-radius:12px;background:#000}
+.photo-btn{display:flex;align-items:center;justify-content:center;margin-top:8px}
+.photo-btn:focus-within{outline:3px solid var(--focus);outline-offset:2px}
+.line input.check{border-color:var(--warn);border-width:2px}
+.l-raw{grid-column:1/-1;margin:4px 0 0;font-size:.85rem;color:var(--ink2);overflow-wrap:anywhere}
 details.photo{margin:10px 0 0}details.photo>summary{list-style:none;display:inline-block;padding:6px 0;min-height:0}details.photo img{display:block;width:100%;border-radius:10px;margin-top:8px}
 .scan-row{display:flex;gap:10px}.scan-row input{flex:1}
 #s-preview{width:100%;max-height:280px;object-fit:contain;border-radius:10px;background:var(--foil);margin-top:8px}
@@ -552,11 +556,14 @@ function openBox(medId){
   );
 }
 
-function lineHtml(){
+function lineHtml(v){
+  v=v||{};
+  const chk=x=>v.read&&!(x>0)?' check':'';
   return '<div class="line">'+
-    '<label class="field wide"><span>Médicament</span><input class="l-name" list="medlist" autocomplete="off" placeholder="Nom et dosage"></label>'+
-    '<label class="field"><span>Unités par jour</span><input class="l-perday" type="number" min="0" step="any" inputmode="decimal" placeholder="ex. 0,25 ou 2"></label>'+
-    '<label class="field"><span>Nombre de jours</span><input class="l-days" type="number" min="1" step="1" inputmode="numeric"></label>'+
+    '<label class="field wide"><span>Médicament</span><input class="l-name" list="medlist" autocomplete="off" placeholder="Nom et dosage" value="'+esc(v.name||'')+'"></label>'+
+    (v.raw?'<p class="l-raw">Lu : \u00ab\u00a0'+esc(v.raw)+'\u00a0\u00bb</p>':'')+
+    '<label class="field"><span>Unités par jour</span><input class="l-perday'+chk(v.perDay)+'" type="number" min="0" step="any" inputmode="decimal" placeholder="ex. 0,25 ou 2" value="'+(v.perDay>0?esc(v.perDay):'')+'"></label>'+
+    '<label class="field"><span>Nombre de jours</span><input class="l-days'+chk(v.days)+'" type="number" min="1" step="1" inputmode="numeric" value="'+(v.days>0?esc(v.days):'')+'"></label>'+
     '<button class="icon" data-act="del-line" aria-label="Retirer ce médicament">\u00d7</button></div>';
 }
 
@@ -565,12 +572,12 @@ function openScript(){
   const opts=state.members.map(m=>'<option value="'+m.id+'">'+esc(m.name)+'</option>').join('')+'<option value="__new">Nouvelle personne\u2026</option>';
   showSheet(
     '<div class="sheet-h"><h2>Nouvelle ordonnance</h2><button class="icon" data-act="close-sheet" aria-label="Fermer">\u00d7</button></div>'+
+    '<label class="btn primary block photo-btn"><input id="s-photo" type="file" accept="image/*" class="sr">Photographier l\u2019ordonnance</label>'+
+    '<p class="info" id="ocrMsg" role="status">L\u2019appli lit les médicaments sur la photo, sur ce téléphone : la photo n\u2019est envoyée nulle part. Posez l\u2019ordonnance à plat, bien éclairée, et cadrez-la en entier.</p>'+
+    '<img id="s-preview" alt="Aperçu de l\u2019ordonnance" hidden>'+
     '<label class="field"><span>Pour qui ?</span><select id="s-member">'+opts+'</select></label>'+
     '<label class="field" id="newMemberWrap" hidden><span>Prénom</span><input id="s-newname" autocomplete="off"></label>'+
     '<label class="field"><span>Début du traitement</span><input id="s-date" type="date" value="'+todayStr()+'"></label>'+
-    '<label class="field"><span>Photo de l\u2019ordonnance (facultatif)</span><input id="s-photo" type="file" accept="image/*" capture="environment"></label>'+
-    '<img id="s-preview" alt="Aperçu de l\u2019ordonnance" hidden>'+
-    '<p class="info">Recopiez les lignes de l\u2019ordonnance ci-dessous en gardant la photo sous les yeux. La photo est gardée avec l\u2019ordonnance.</p>'+
     '<h2 style="margin-top:22px">Médicaments prescrits</h2>'+
     '<div id="lines">'+lineHtml()+'</div>'+medNamesList()+
     '<div class="row-actions"><button class="btn" data-act="add-line">Ajouter un médicament</button></div>'+
@@ -696,6 +703,222 @@ function stopScan(){
   if(scanTimer){clearInterval(scanTimer);scanTimer=null;}
   if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
   const b=$('.scanbox');if(b)b.hidden=true;
+}
+
+/* ---------- Lecture du texte d'une ordonnance ---------- */
+/* Transforme le texte reconnu (OCR) en lignes { name, perDay, days }.
+   Règles simples, pensées pour les ordonnances françaises imprimées. */
+const RX_STRIP=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+const NUMW={un:1,une:1,deux:2,trois:3,quatre:4,cinq:5,six:6,sept:7,huit:8,neuf:9,dix:10,douze:12,quinze:15,vingt:20,trente:30,demi:0.5};
+const NUM='(\\d+(?:[.,]\\d+)?|1/2|½|1/4|¼|un|une|deux|trois|quatre|cinq|six|sept|huit|neuf|dix|douze|quinze|vingt|trente|demi)';
+const UNIT='(?:mg|g|µg|ug|mcg|ml|ui|u\\.?i\\.?|%|mg/ml|mg/g|microgrammes?|milligrammes?|grammes?)';
+const FORM='(?:cp|cps|comprimes?|cpr|gel|gelules?|caps(?:ules?)?|sachets?|ampoules?|amp|doses?|bouffees?|inhalations?|pulverisations?|gouttes?|gttes?|cuillere?s?(?:\\s+a\\s+(?:soupe|cafe))?|cac|cas|suppositoires?|suppo|applications?|patchs?|unites?|injections?|mesures?|pipettes?|ovules?|pastilles?)';
+function num(s){
+  s=RX_STRIP(s).trim();
+  if(s==='1/2'||s==='½')return 0.5;
+  if(s==='1/4'||s==='¼')return 0.25;
+  if(s in NUMW)return NUMW[s];
+  const n=Number(s.replace(',','.'));
+  return isFinite(n)?n:NaN;
+}
+const NOISE=/\b(docteur|dr\.?|medecin|rpps|adeli|finess|tel|telephone|fax|e-?mail|courriel|ne\(e\)|nee? le|patient|patiente|madame|monsieur|mme|mr|m\.|adresse|cabinet|signature|ordonnance|bizone|ald|affection|securite sociale|cpam|rue|avenue|bd|boulevard|cedex|age|poids|kg|taille|renouvel|qsp total|medecine generale|specialiste|conventionne|secteur|consultation|sur rendez|rdv|www\.|@)\b/;
+
+function isDrugLine(raw,known){
+  const t=RX_STRIP(raw);
+  if(t.replace(/[^a-z]/g,'').length<3)return false;
+  const key=t.replace(/[^a-z0-9]/g,'');
+  for(const k of known)if(k.length>=5&&key.indexOf(k)===0)return true;
+  if(NOISE.test(t))return false;
+  // un dosage (500 mg, 1 g, 100 000 UI, 2,5 %) précédé d'un mot d'au moins 3 lettres
+  if(new RegExp('[a-z]{3,}[^\\n]*?\\d+(?:[ .,]\\d+)*\\s?'+UNIT+'(?![a-z])').test(t))return true;
+  // ligne à puce ou numérotée qui commence par un nom (« - Rhinofluimucil … »)
+  if(/^\s*(?:[-–•*·]|\d{1,2}\s*[).])\s*[A-Za-zÀ-ÿ]{4,}/.test(raw)&&!/^\s*(?:[-–•*·]|\d{1,2}\s*[).])\s*(prendre|faire|appliquer|mettre|si|en|a|le|la|les|pendant|puis|matin|midi|soir)\b/.test(t))return true;
+  // NOM EN MAJUSCULES suivi d'une forme (DOLIPRANE comprimé)
+  if(/^[\s\-•*\d.)]*[A-ZÉÈÀÇ][A-ZÉÈÀÇ0-9\- ]{3,}/.test(raw.trim())&&new RegExp('\\b'+FORM+'\\b').test(t)&&!/\b(fois|par jour|matin|soir|pendant)\b/.test(t))return true;
+  return false;
+}
+function cleanName(raw){
+  let s=raw.replace(/^[\s\-–•*·>]*(?:\d{1,2}\s*[).\-]\s+)?/,'').trim();
+  // garder jusqu'au dosage inclus (et sa forme : « 500 mg gélule »)
+  const t=RX_STRIP(s);
+  const m=new RegExp('^(.*?\\d+(?:[ .,]\\d+)*\\s?'+UNIT+'(?:\\s*/\\s*\\d*(?:[.,]\\d+)?\\s?'+UNIT+')?)(?![a-z])').exec(t);
+  if(m)s=s.slice(0,m[1].length);
+  else{
+    const f=new RegExp('\\s(?:'+FORM+'|:|,|-)\\b').exec(t);
+    if(f&&f.index>2)s=s.slice(0,f.index);
+  }
+  s=s.replace(/[\s:;,\-–]+$/,'').replace(/\s+/g,' ');
+  // MAJUSCULES -> Majuscule initiale, en gardant les unités en minuscules
+  const letters=s.replace(/\d.*$/,'');
+  if(letters.length>2&&letters===letters.toUpperCase())s=s.toLowerCase().replace(/(^|\s|-)([a-zà-ÿ])/g,(a,b,c)=>b+c.toUpperCase()).replace(/\b(Mg|Ml|Ug|Mcg|G)\b/g,x=>x.toLowerCase()).replace(/\bUi\b/g,'UI');
+  return s;
+}
+function readPerDay(t){
+  // 1-0-1 / 1-1-1-1
+  let m=/(?:^|\s)((?:\d(?:[.,]5)?|1\/2)\s*-\s*(?:\d(?:[.,]5)?|1\/2)\s*-\s*(?:\d(?:[.,]5)?|1\/2)(?:\s*-\s*(?:\d(?:[.,]5)?|1\/2))?)(?=\s|$)/.exec(t);
+  if(m){const v=m[1].split('-').map(num).reduce((a,b)=>a+b,0);if(v>0)return v;}
+  const qtyRe=new RegExp(NUM+'\\s*'+FORM+'?');
+  const leadQty=()=>{
+    const q=new RegExp(NUM+'\\s*'+FORM).exec(t)||new RegExp('(?:^|\\s)'+NUM+'(?=\\s+(?:le|au|a|matin|midi|soir|par|x|fois))').exec(t);
+    const v=q?num(q[1]):1;return v>0&&v<20?v:1;
+  };
+  // toutes les N heures
+  m=/toutes? les\s+(\d+)\s*(?:h|heures?)\b/.exec(t);
+  if(m&&+m[1]>0)return leadQty()*Math.round(24/+m[1]);
+  // N fois par jour / N x/j / Nx par jour
+  m=new RegExp(NUM+'\\s*(?:fois|x)\\s*(?:/|par|le|au)?\\s*(?:jour|j)\\b').exec(t)||new RegExp('(?:x|fois)\\s*'+NUM+'\\s*(?:/|par)\\s*(?:jour|j)\\b').exec(t);
+  if(m){const f=num(m[1]);if(f>0)return leadQty()*f;}
+  // matin / midi / soir / coucher
+  const moments=['matin','midi','gouter','soir','coucher','nuit'].filter(w=>new RegExp('\\b'+w+'s?\\b').test(t));
+  if(moments.length){
+    // « 2 le matin et 1 le soir »
+    const parts=[...t.matchAll(new RegExp(NUM+'\\s*'+FORM+'?\\s*(?:le|au|a|au moment du|du)?\\s*(matin|midi|gouter|soir|coucher|nuit)','g'))];
+    if(parts.length>=2)return parts.reduce((a,p)=>a+(num(p[1])||1),0);
+    let n=moments.length;
+    if(moments.indexOf('soir')>=0&&moments.indexOf('coucher')>=0)n--;
+    return leadQty()*n;
+  }
+  // N par jour / N cp/j / N comprimés par jour
+  m=new RegExp(NUM+'\\s*'+FORM+'?\\s*(?:/|par)\\s*(?:jour|j|24\\s*h)\\b').exec(t);
+  if(m){const v=num(m[1]);if(v>0)return v;}
+  // une fois / N comprimé(s) sans fréquence : 1 par jour par défaut s'il y a « par jour » ailleurs
+  if(/\b(par jour|\/j|quotidien|chaque jour|tous les jours)\b/.test(t))return leadQty();
+  return 0;
+}
+function readDays(t){
+  let m=new RegExp('(?:pendant|durant|pour|sur|qsp|q\\.s\\.p\\.?|x|duree\\s*:?)\\s*'+NUM+'\\s*(jours?|j|semaines?|sem|mois|m)\\b').exec(t)
+     ||new RegExp('(?:^|\\s)'+NUM+'\\s*(jours?|semaines?|mois)\\b').exec(t)
+     ||/(?:^|[\s,;])(\d+)\s*(j)\b(?!\s*\/)/.exec(t);
+  if(!m)return 0;
+  const n=num(m[1]);if(!(n>0))return 0;
+  const u=m[2];
+  return Math.round(u[0]==='s'?n*7:u[0]==='m'?n*30:n);
+}
+const MONTHS={janvier:1,fevrier:2,mars:3,avril:4,mai:5,juin:6,juillet:7,aout:8,septembre:9,octobre:10,novembre:11,decembre:12};
+function readDate(text){
+  const t=RX_STRIP(text);
+  let m=/\b(\d{1,2})[\/.\-](\d{1,2})[\/.\-](20\d{2}|\d{2})\b/.exec(t);
+  let d,mo,y;
+  if(m){d=+m[1];mo=+m[2];y=+m[3];}
+  else{
+    m=/\b(\d{1,2}|1er)\s+(janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre)\s+(20\d{2})\b/.exec(t);
+    if(m){d=m[1]==='1er'?1:+m[1];mo=MONTHS[m[2]];y=+m[3];}
+  }
+  if(!m)return '';
+  if(y<100)y+=2000;
+  if(mo<1||mo>12||d<1||d>31)return '';
+  const now=new Date();
+  const dt=new Date(y,mo-1,d);
+  // une date de naissance ou très ancienne n'est pas la date de l'ordonnance
+  if(dt>new Date(now.getFullYear(),now.getMonth(),now.getDate()+1)||(now-dt)>400*86400000)return '';
+  return y+'-'+String(mo).padStart(2,'0')+'-'+String(d).padStart(2,'0');
+}
+function parseOrdonnance(text,knownNames){
+  const known=(knownNames||[]).map(n=>RX_STRIP(n).replace(/[^a-z0-9]/g,'')).filter(Boolean);
+  const rows=String(text||'').split(/\r?\n/).map(s=>s.replace(/[|_~]+/g,' ').replace(/(\d)\s?(?:jig|jg|pg|ug|yg|μg|mcg)\b/gi,'$1 µg').replace(/\s+/g,' ').trim()).filter(Boolean);
+  const out=[];let cur=null;
+  // durée valable pour toute l'ordonnance (« Traitement pour 1 mois », « QSP 3 mois »)
+  let globalDays=0;
+  for(const r of rows){
+    const t=RX_STRIP(r);
+    if(/\b(qsp|traitement|renouveler|renouvelable)\b/.test(t)&&!isDrugLine(r,known)){const d=readDays(t);if(d)globalDays=d;}
+  }
+  for(const r of rows){
+    if(isDrugLine(r,known)){
+      cur={name:cleanName(r),text:RX_STRIP(r),raw:[r]};out.push(cur);
+    }else if(cur&&cur.raw.length<4&&!NOISE.test(RX_STRIP(r))){
+      cur.text+=' '+RX_STRIP(r);cur.raw.push(r);
+    }else if(cur&&cur.raw.length>=4)cur=null;
+  }
+  return {
+    date:readDate(text),
+    lines:out.filter(l=>l.name.length>=3).map(l=>({
+      name:l.name,
+      perDay:readPerDay(l.text),
+      days:readDays(l.text)||globalDays,
+      raw:l.raw.join(' / ')
+    }))
+  };
+}
+
+/* ---------- Lecture de la photo sur le téléphone (tesseract.js) ---------- */
+let ocrWorker=null,ocrProgress=null,ocrRun=0;
+function loadScript(src){
+  return new Promise((ok,ko)=>{const el=document.createElement('script');el.src=src;el.onload=ok;el.onerror=ko;document.head.appendChild(el);});
+}
+async function getOcr(){
+  if(!window.Tesseract)await loadScript('vendor/tesseract/tesseract.min.js');
+  if(!ocrWorker){
+    const base=new URL('vendor/tesseract/',location.href).href;
+    ocrWorker=await window.Tesseract.createWorker('fra',1,{
+      workerPath:base+'worker.min.js',corePath:base+'core/',langPath:base+'lang',
+      gzip:true,workerBlobURL:false,
+      logger:m=>{if(ocrProgress)ocrProgress(m);}
+    });
+  }
+  return ocrWorker;
+}
+/* Prépare l'image : taille raisonnable, niveaux de gris, contraste étiré. */
+function prepForOcr(file){
+  return new Promise((ok,ko)=>{
+    const url=URL.createObjectURL(file);
+    const im=new Image();
+    im.onload=()=>{
+      const k=Math.min(1,2400/Math.max(im.naturalWidth,im.naturalHeight));
+      const c=document.createElement('canvas');
+      c.width=Math.round(im.naturalWidth*k);c.height=Math.round(im.naturalHeight*k);
+      const g=c.getContext('2d');g.drawImage(im,0,0,c.width,c.height);
+      URL.revokeObjectURL(url);
+      try{
+        const d=g.getImageData(0,0,c.width,c.height),p=d.data;
+        let lo=255,hi=0;const lum=new Uint8ClampedArray(p.length/4);
+        for(let i=0,j=0;i<p.length;i+=4,j++){const v=(p[i]*299+p[i+1]*587+p[i+2]*114)/1000;lum[j]=v;if(v<lo)lo=v;if(v>hi)hi=v;}
+        const span=Math.max(40,hi-lo);
+        for(let i=0,j=0;i<p.length;i+=4,j++){const v=(lum[j]-lo)*255/span;p[i]=p[i+1]=p[i+2]=v;}
+        g.putImageData(d,0,0);
+      }catch(e){}
+      ok(c);
+    };
+    im.onerror=()=>{URL.revokeObjectURL(url);ko(new Error('image'));};
+    im.src=url;
+  });
+}
+/* Rapproche un nom lu d'un médicament déjà connu du foyer. */
+function matchKnown(name){
+  const k=nameKey(name);if(k.length<4)return name;
+  const hit=state.meds.find(m=>{const mk=nameKey(m.name);return mk&&(mk===k||(mk.length>=5&&k.indexOf(mk)===0)||(k.length>=5&&mk.indexOf(k)===0));});
+  return hit?hit.name:name;
+}
+async function readPrescription(file){
+  const msg=$('#ocrMsg');if(!msg)return;
+  const run=++ocrRun;
+  const say=t=>{if(run===ocrRun&&msg.isConnected)msg.textContent=t;};
+  say('Préparation de la lecture\u2026');
+  ocrProgress=m=>{
+    if(m.status==='recognizing text')say('Lecture de l\u2019ordonnance\u2026 '+Math.round((m.progress||0)*100)+' %');
+    else if(/load|initializ/i.test(m.status||''))say('Préparation de la lecture\u2026 (la première fois, l\u2019appli télécharge environ 5 Mo)');
+  };
+  let text='';
+  try{
+    const [w,canvas]=await Promise.all([getOcr(),prepForOcr(file)]);
+    const res=await w.recognize(canvas);
+    text=res&&res.data?res.data.text:'';
+  }catch(e){
+    say('La lecture n\u2019a pas fonctionné sur ce téléphone. Saisissez les lignes à la main.');
+    return;
+  }
+  if(run!==ocrRun||!msg.isConnected)return;
+  const r=parseOrdonnance(text,state.meds.map(m=>m.name));
+  if(r.date){const d=$('#s-date');if(d)d.value=r.date;}
+  if(!r.lines.length){
+    say('Aucun médicament reconnu. Reprenez la photo plus nette, à plat et bien éclairée, ou saisissez les lignes à la main.');
+    return;
+  }
+  // remplace les lignes vides par celles lues
+  $$('#lines .line').forEach(row=>{if(!$('.l-name',row).value.trim())row.remove();});
+  $('#lines').insertAdjacentHTML('beforeend',r.lines.map(l=>lineHtml({name:matchKnown(l.name),perDay:l.perDay,days:l.days,raw:l.raw,read:true})).join(''));
+  const n=r.lines.length,todo=r.lines.filter(l=>!(l.perDay>0)||!(l.days>0)).length;
+  say(n+' '+pl(n,'médicament lu','médicaments lus')+'. Vérifiez chaque ligne avec l\u2019ordonnance'+(todo?' et complétez les cases en orange':'')+' avant d\u2019enregistrer.');
 }
 
 /* ---------- Photo d'ordonnance ---------- */
@@ -934,6 +1157,7 @@ document.addEventListener('change',e=>{
       if(!img.isConnected)return;
       pendingPhoto=url;img.src=url;img.hidden=false;
     }).catch(()=>{toast('Cette image n\u2019a pas pu être lue.');});
+    readPrescription(f);
   }
   if(t.id==='import-file'){
     const f=t.files&&t.files[0];t.value='';
