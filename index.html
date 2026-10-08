@@ -556,6 +556,7 @@ function openBox(medId){
     '<label class="field"><span>Unités par boîte</span><input id="f-perbox" type="number" min="1" step="1" inputmode="numeric" value="'+esc(med&&med.perBox?med.perBox:'')+'"></label>'+
     '<label class="field"><span>Nombre de boîtes</span><input id="f-boxes" type="number" min="1" step="1" inputmode="numeric" value="1"></label>'+
     '</div>'+
+    '<label class="field"><span>Unités ajoutées au stock</span><input id="f-units" type="number" min="0" step="any" inputmode="decimal" value="'+esc(med&&med.perBox?med.perBox:'')+'"><small class="muted">Calculé tout seul. Changez-le pour une boîte entamée.</small></label>'+
     '<div class="grid2">'+
     '<label class="field"><span>Date de péremption</span><input id="f-exp" type="date"></label>'+
     '<label class="field"><span>Numéro de lot</span><input id="f-lot" autocomplete="off"></label>'+
@@ -651,7 +652,31 @@ function parseCode(raw){
   return out;
 }
 
-function applyCode(raw){
+/* ---------- Base publique des médicaments (code CIP -> nom, unités) ---------- */
+/* data/bdpm.json est reconstruit chaque mois par GitHub depuis la BDPM officielle. */
+let bdpmP=null;
+function loadBdpm(){
+  if(!bdpmP)bdpmP=fetch('data/bdpm.json').then(r=>{if(!r.ok)throw new Error(r.status);return r.json();}).catch(()=>{bdpmP=null;return null;});
+  return bdpmP;
+}
+/* « AMOXICILLINE BIOGARAN 500 mg, gélule » -> « Amoxicilline Biogaran 500 mg » */
+function prettyMedName(n){
+  let s=String(n||'').split(/,\s/)[0].trim();
+  const core=s.replace(/\d[\d.,\s]*(?:mg|g|ml|µg|ui|%)(?![a-z])/gi,'').replace(/[^A-Za-zÀ-ÿ]/g,'');
+  if(core.length>2&&core===core.toUpperCase()){
+    s=s.toLowerCase().replace(/(^|[\s\-\/(])([a-zà-ÿ])/g,(a,b,c)=>b+c.toUpperCase())
+      .replace(/\b(Mg|Ml|G|Mcg|Ug|Microgrammes?|Milligrammes?)\b/g,x=>x.toLowerCase()).replace(/\bUi\b/g,'UI').replace(/µG\b/g,'µg');
+  }
+  return s;
+}
+async function lookupCip(cip){
+  const db=await loadBdpm();
+  const e=db&&db.c&&db.c[cip];
+  if(!e)return null;
+  return {name:prettyMedName(db.n[e[0]]),fullName:db.n[e[0]],perBox:e[1]||0,group:(db.g&&db.g[e[0]])||0};
+}
+
+async function applyCode(raw){
   const msg=$('#scanMsg');if(!msg)return;
   const r=parseCode(raw);
   if(!r.cip13&&!r.expiry){
@@ -660,16 +685,41 @@ function applyCode(raw){
   }
   sheet.dataset.cip=r.cip13||'';
   sheet.dataset.cipSrc=r.cip13?'scan':'';
-  const known=r.cip13?state.meds.find(m=>m.cip13===r.cip13):null;
-  if(known){
-    $('#f-name').value=known.name;
-    $('#f-perbox').value=known.perBox||'';
-  }
   if(r.expiry)$('#f-exp').value=r.expiry;
   if(r.lot)$('#f-lot').value=r.lot;
-  msg.textContent=known
-    ?'Boîte reconnue : '+known.name+'. Vérifiez la date, puis ajoutez-la au stock.'
-    :'Code lu. Ce médicament est nouveau pour le foyer : indiquez son nom et le nombre d\u2019unités par boîte. Ils seront retenus pour les prochains scans.';
+  const got=[];
+  if(r.expiry)got.push('la péremption');
+  if(r.lot)got.push('le lot');
+  const known=r.cip13?state.meds.find(m=>m.cip13===r.cip13):null;
+  let info=null;
+  if(!known&&r.cip13){
+    msg.textContent='Code lu. Recherche du médicament\u2026';
+    info=await lookupCip(r.cip13);
+    if(!msg.isConnected||sheet.dataset.cip!==r.cip13)return;
+  }
+  const src=known||info;
+  if(src){
+    $('#f-name').value=src.name;
+    const pb=$('#f-perbox');
+    if(src.perBox){pb.value=src.perBox;pb.dataset.auto='1';}
+    syncUnits();
+    got.unshift('le nom');
+    if(src.perBox)got.splice(1,0,'le nombre d\u2019unités');
+  }
+  const list=got.length>1?got.slice(0,-1).join(', ')+' et '+got[got.length-1]:got[0];
+  if(src){
+    msg.textContent='Boîte reconnue : '+src.name+(info?' (base publique des médicaments)':'')+'. '+
+      (list?'J\u2019ai rempli '+list+'. ':'')+
+      (src.perBox?'':'Indiquez le nombre d\u2019unités par boîte. ')+'Vérifiez, corrigez si besoin, puis ajoutez au stock.';
+  }else{
+    msg.textContent='Code lu'+(list?' : j\u2019ai rempli '+list:'')+'. Ce médicament n\u2019a pas été trouvé dans la base : indiquez son nom et le nombre d\u2019unités par boîte, ils seront retenus pour les prochains scans.';
+  }
+}
+/* Unités ajoutées au stock = unités par boîte × boîtes, sauf si on l'a changé à la main (boîte entamée). */
+function syncUnits(){
+  const u=$('#f-units');if(!u||u.dataset.manual==='1')return;
+  const n=(Number($('#f-perbox').value)||0)*(Number($('#f-boxes').value)||0);
+  u.value=n>0?n:'';
 }
 
 /* Décodage : le lecteur intégré au navigateur s'il sait lire le DataMatrix,
@@ -1093,6 +1143,7 @@ function saveBox(){
   const name=$('#f-name').value.trim();
   const perBox=Number($('#f-perbox').value);
   const boxes=Number($('#f-boxes').value)||1;
+  const unitsIn=$('#f-units')?Number($('#f-units').value):NaN;
   const expiry=$('#f-exp').value;
   const lot=$('#f-lot').value.trim();
   const cip=sheet.dataset.cip||'';
@@ -1107,12 +1158,12 @@ function saveBox(){
     med.perBox=perBox;
     if(cip&&!med.cip13)med.cip13=cip;
   }
-  const units=perBox*boxes;
+  const units=unitsIn>0?unitsIn:perBox*boxes;
   const same=lot&&expiry?med.batches.find(b=>b.lot===lot&&b.expiry===expiry):null;
   if(same)same.units=(Number(same.units)||0)+units;
   else med.batches.push({id:uid(),lot:lot,expiry:expiry,units:units});
   closeSheet();
-  toast('Ajouté : '+boxes+' '+pl(boxes,'boîte','boîtes')+' de '+med.name);
+  toast('Ajouté : '+fmt(units)+' '+pl(units,'unité','unités')+' de '+med.name);
   commit();
 }
 
@@ -1270,10 +1321,12 @@ document.addEventListener('change',e=>{
   if(t.id==='f-name'){
     const m=findMed(t.value,'');
     const pb=$('#f-perbox');
-    if(m&&m.perBox&&pb&&(!pb.value||pb.dataset.auto==='1')){pb.value=m.perBox;pb.dataset.auto='1';}
+    if(m&&m.perBox&&pb&&(!pb.value||pb.dataset.auto==='1')){pb.value=m.perBox;pb.dataset.auto='1';syncUnits();}
     return;
   }
-  if(t.id==='f-perbox'){t.dataset.auto='0';return;}
+  if(t.id==='f-perbox'){t.dataset.auto='0';syncUnits();return;}
+  if(t.id==='f-boxes'){syncUnits();return;}
+  if(t.id==='f-units'){t.dataset.manual=t.value?'1':'0';if(!t.value)syncUnits();return;}
   if(t.id==='s-photo'){
     const img=$('#s-preview');const f=t.files&&t.files[0];
     pendingPhoto='';
@@ -1296,6 +1349,7 @@ document.addEventListener('change',e=>{
 
 document.addEventListener('input',e=>{
   const t=e.target;
+  if(t.id==='f-perbox'||t.id==='f-boxes'){syncUnits();return;}
   if(t.id==='zoom'&&scanTrack){scanTrack.applyConstraints({advanced:[{zoom:Number(t.value)}]}).catch(()=>{});return;}
   if(t.id==='f-name'&&sheet.dataset.cipSrc!=='scan'){
     const m=findMed(t.value,'');

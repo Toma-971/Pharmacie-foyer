@@ -1,6 +1,6 @@
 /* Mode hors connexion : l'appli est gardée en cache sur le téléphone.
    Changer VERSION à chaque mise à jour pour que les téléphones la récupèrent. */
-const VERSION='pharmacie-v5-1';
+const VERSION='pharmacie-v6-1';
 const SHELL=['./','index.html','manifest.webmanifest','icons/icon-192.png','icons/icon-512.png','icons/icon-maskable-512.png','icons/apple-touch-icon.png'];
 
 self.addEventListener('install',e=>{
@@ -18,6 +18,15 @@ self.addEventListener('fetch',e=>{
     e.respondWith(fetch(req).then(r=>{
       const copy=r.clone();caches.open(VERSION).then(c=>c.put('index.html',copy));return r;
     }).catch(()=>caches.match('index.html')));
+    return;
+  }
+  // Base des médicaments : la copie en cache tout de suite, mise à jour en arrière-plan.
+  if(url.origin===location.origin&&url.pathname.indexOf('/data/')>=0){
+    e.respondWith(caches.open(VERSION).then(c=>c.match(req).then(hit=>{
+      const net=fetch(req).then(r=>{if(r.ok)c.put(req,r.clone());return r;}).catch(()=>hit||Response.error());
+      if(hit){e.waitUntil(net);return hit;}
+      return net;
+    })));
     return;
   }
   // Polices Google et fichiers de l'appli : cache d'abord.
