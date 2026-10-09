@@ -1,0 +1,9 @@
+Copyright (c) 2026 Toma-971 (Pharmacie du foyer). Tous droits réservés.
+
+Ce code source, ses textes, ses icônes et sa présentation sont protégés par le droit d'auteur.
+Aucune licence n'est accordée : toute reproduction, modification, diffusion ou utilisation
+commerciale, même partielle, est interdite sans l'autorisation écrite de l'auteur.
+
+Les bibliothèques tierces du dossier vendor/ (tesseract.js, zxing-wasm) restent soumises
+à leurs propres licences. Les données de data/bdpm.json proviennent de la Base de données
+publique des médicaments (ANSM, HAS, CNAM).
