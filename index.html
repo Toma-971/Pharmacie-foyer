@@ -138,10 +138,12 @@ input[type=file]{padding:10px 12px;height:auto}
 .take-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline}
 .take-head h3{margin:0;font-size:1.05rem}
 .take-row{display:flex;align-items:center;gap:10px;margin-top:10px}
-.take-row .btn{margin:0}
+.take-row .btn{margin:0;min-width:48px;padding-left:12px;padding-right:12px}
 .take-count{flex:1;font-weight:700}
 .take.done .take-count{color:var(--brand)}
 .lot-warn{display:block;margin-top:6px}
+.stock-alert.similar{border-color:var(--warn)}
+.stock-alert.similar p{margin:0 0 6px}
 .photo-btn{display:flex;align-items:center;justify-content:center;margin-top:8px}
 .photo-btn:focus-within{outline:3px solid var(--focus);outline-offset:2px}
 .line input.check{border-color:var(--warn);border-width:2px}
@@ -250,7 +252,8 @@ function sanitize(s){
   const intakes=arr(s.intakes).map(k=>({id:String(k.id),medId:String(k.medId||''),lineId:String(k.lineId||''),
     date:/^\d{4}-\d{2}-\d{2}$/.test(k.date||'')?k.date:todayStr(),at:Number(k.at)||Date.now(),units:Math.max(0,Number(k.units)||0),memberId:String(k.memberId||'')}))
     .filter(k=>k.medId&&k.units>0&&k.date>=oldest);
-  return {members:arr(s.members).map(m=>({id:String(m.id),name:String(m.name||'')})),meds:meds,scripts:scripts,intakes:intakes};
+  const notSame=(Array.isArray(s.notSame)?s.notSame:[]).filter(x=>typeof x==='string');
+  return {members:arr(s.members).map(m=>({id:String(m.id),name:String(m.name||'')})),meds:meds,scripts:scripts,intakes:intakes,notSame:notSame};
 }
 let state=sanitize(load());
 let tab='need';
@@ -443,6 +446,7 @@ function buildAliases(db){
 /* Index de substance (dans db.s) d'un médicament, ou -1. */
 function substIndex(name,cip){
   const db=bdpmDb;if(!db||!db.s||!db.ns)return -1;
+  if(!aliasMap)buildAliases(db);
   if(cip&&db.c[cip]){const si=db.ns[db.c[cip][0]];if(si>=0)return si;}
   if(!aliasMap)buildAliases(db);
   const k=canonKey(name);
@@ -475,9 +479,15 @@ function mergeSame(){
   const merged=[];
   groups.forEach(g=>{
     if(g.length<2)return;
-    settle();g.forEach(freeze);
     const used=id=>state.scripts.some(s=>s.lines.some(l=>l.medId===id));
     g.sort((a,b)=>(used(b.id)?1:0)-(used(a.id)?1:0));
+    merged.push(mergeGroup(g,true).name);
+  });
+  return merged;
+}
+/* Fusionne g[1..] dans g[0] : lots (avec leur marque), lignes d'ordonnance et prises. */
+function mergeGroup(g,rename){
+    settle();g.forEach(freeze);
     const target=g[0];
     for(const o of g.slice(1)){
       for(const b of o.batches){if(!b.brand&&nameKey(o.name)!==nameKey(target.name))b.brand=o.name;target.batches.push(b);}
@@ -488,11 +498,37 @@ function mergeSame(){
       state.meds.splice(state.meds.indexOf(o),1);
       openMeds.delete(o.id);
     }
-    const names=g.map(m=>m.name);
-    renameToSubst(target,names);
-    merged.push(target.name);
-  });
-  return merged;
+    if(rename)renameToSubst(target,g.map(m=>m.name));
+    keyMemo.clear();
+    return target;
+}
+/* Noms proches qui ne sont pas reconnus comme le même médicament :
+   même premier mot (à une faute près) et pas de dosage contradictoire. */
+function lev(a,b){
+  if(Math.abs(a.length-b.length)>2)return 9;
+  let prev=Array.from({length:b.length+1},(_,i)=>i);
+  for(let i=1;i<=a.length;i++){
+    const cur=[i];
+    for(let j=1;j<=b.length;j++)cur[j]=Math.min(prev[j]+1,cur[j-1]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1));
+    prev=cur;
+  }
+  return prev[b.length];
+}
+function nameParts(m){
+  const k=canonKey(m.name).split(' ');
+  return {word:k.find(w=>/^[a-z]{4,}$/.test(w))||'',doses:k.filter(w=>/^\d/.test(w)).map(stripUnits).sort().join(' ')};
+}
+function similarPairs(){
+  const out=[],ps=state.meds.map(m=>[m,nameParts(m)]);
+  const no=new Set(state.notSame);
+  for(let i=0;i<ps.length;i++)for(let j=i+1;j<ps.length;j++){
+    const [a,pa]=ps[i],[b,pb]=ps[j];
+    if(!pa.word||!pb.word||no.has([a.id,b.id].sort().join('|')))continue;
+    const close=pa.word===pb.word||(pa.word.length>=6&&lev(pa.word,pb.word)<=1);
+    const dosesOk=pa.doses===pb.doses||!pa.doses||!pb.doses;
+    if(close&&dosesOk)out.push([a,b]);
+  }
+  return out;
 }
 /* Plusieurs marques dans un même médicament : il prend le nom de la substance,
    chaque lot garde sa marque. */
@@ -618,7 +654,7 @@ const takeStep=l=>{const p=Number(l.perDay)||1;return p<1?p:1;};
 function viewTake(){
   const t=todayStr();
   let h='<h1 class="page-title">Prises du jour</h1>'+
-    '<p class="sub" style="margin-bottom:8px">Touchez « Prise » à chaque médicament pris : le stock baisse tout de suite. Les jours où rien n\u2019est coché, l\u2019appli retire les prises prévues par l\u2019ordonnance.</p>';
+    '<p class="sub" style="margin-bottom:8px">Touchez « + 1 » à chaque unité prise, « + ½ » pour une demi-unité : le stock baisse tout de suite. Les jours où rien n\u2019est coché, l\u2019appli retire les prises prévues par l\u2019ordonnance.</p>';
   const byWho=new Map();
   for(const s of state.scripts){
     for(const l of s.lines){
@@ -639,7 +675,8 @@ function viewTake(){
       h+='<article class="take'+(done?' done':'')+'"><div class="take-head"><h3>'+esc(it.m.name)+'</h3><span class="muted">'+fmt(per)+' par jour</span></div>'+
         '<div class="take-row"><span class="take-count">'+(done?'\u2713 ':'')+'Pris : '+fmt(got)+' sur '+fmt(per)+'</span>'+
         (got>0?'<button class="btn" data-act="untake" data-line="'+it.l.id+'" aria-label="Annuler la dernière prise">\u2212</button>':'')+
-        '<button class="btn primary" data-act="take" data-script="'+it.s.id+'" data-line="'+it.l.id+'">+ Prise</button></div>'+
+        '<button class="btn" data-act="take" data-half="1" data-script="'+it.s.id+'" data-line="'+it.l.id+'" aria-label="Une demi-prise">+ \u00bd</button>'+
+        '<button class="btn primary" data-act="take" data-script="'+it.s.id+'" data-line="'+it.l.id+'">+ 1</button></div>'+
         '<p class="muted'+(left<need?' bad':'')+'">Stock : '+fmt(left)+' '+pl(left,'unité','unités')+(left<need?', il en faudra '+fmt(need)+' d\u2019ici la fin du traitement':'')+'.</p></article>';
     }
   });
@@ -668,7 +705,7 @@ function openAdhoc(){
   if(!meds.length){toast('Ajoutez d\u2019abord une boîte au stock.');return;}
   showSheet('<div class="sheet-h"><h2>Prise hors ordonnance</h2><button class="icon" data-act="close-sheet" aria-label="Fermer">\u00d7</button></div>'+
     '<label class="field"><span>Médicament</span><select id="a-med">'+meds.map(m=>'<option value="'+m.id+'">'+esc(m.name)+' ('+fmt(usable(m))+' en stock)</option>').join('')+'</select></label>'+
-    '<div class="grid2"><label class="field"><span>Unités prises</span><input id="a-units" type="number" min="0" step="any" inputmode="decimal" value="1"></label>'+
+    '<div class="grid2"><label class="field"><span>Unités prises (0,5 pour une moitié)</span><input id="a-units" type="number" min="0" step="0.5" inputmode="decimal" value="1"></label>'+
     '<label class="field"><span>Pour qui ?</span><select id="a-who"><option value="">\u2014</option>'+state.members.map(m=>'<option value="'+m.id+'">'+esc(m.name)+'</option>').join('')+'</select></label></div>'+
     '<p class="msg" id="formMsg" role="alert"></p>'+
     '<button class="btn primary block" data-act="save-adhoc">Noter la prise</button>');
@@ -680,6 +717,11 @@ function viewStock(){
   const meds=state.meds.slice().sort((a,b)=>a.name.localeCompare(b.name,'fr'));
   let nExp=0;
   for(const m of meds){const e=estimate(m);nExp+=m.batches.filter(b=>isExpired(b)&&e.get(b.id)>0).length;}
+  for(const [a,b] of similarPairs().slice(0,3)){
+    h+='<div class="stock-alert similar"><p><b>Même médicament ?</b> « '+esc(a.name)+' » et « '+esc(b.name)+' » se ressemblent.</p>'+
+      '<div class="row-actions"><button class="btn" data-act="merge-pair" data-a="'+a.id+'" data-b="'+b.id+'">Regrouper</button>'+
+      '<button class="linkbtn" data-act="not-same" data-a="'+a.id+'" data-b="'+b.id+'">Ce sont deux médicaments différents</button></div></div>';
+  }
   if(nExp)h+='<p class="stock-alert"><b>'+nExp+' '+pl(nExp,'lot périmé','lots périmés')+'</b>, '+pl(nExp,'marqué','marqués')+' en rouge ci-dessous. Ces unités ne comptent pas dans le stock disponible : rapportez-les en pharmacie, puis touchez « Retirer ».</p>';
   h+='<div style="margin-top:18px">';
   for(const m of meds){
@@ -721,7 +763,7 @@ function scriptHtml(s){
   return '<article class="script'+(run?'':' done')+'"><div class="s-head"><h3>'+esc(who?who.name:'Personne supprimée')+'</h3><span class="muted">'+when+'</span></div>'+
     '<ul class="s-lines">'+lines+'</ul>'+
     (s.photo?'<details class="photo"><summary class="linkbtn">Voir la photo de l\u2019ordonnance</summary><img src="'+s.photo+'" alt="Photo de l\u2019ordonnance"></details>':'')+
-    '<div class="s-actions">'+
+    '<div class="s-actions"><button class="btn" data-act="edit-script" data-id="'+s.id+'">Modifier</button>'+
     (run?'<button class="btn" data-act="toggle-script" data-id="'+s.id+'">Arrêter le traitement</button>'
       :!s.active?'<button class="btn" data-act="toggle-script" data-id="'+s.id+'">Reprendre le traitement</button>':'')+
     '<button class="linkbtn" data-act="del-script" data-id="'+s.id+'" data-confirm="Confirmer la suppression">Supprimer</button></div></article>';
@@ -839,7 +881,7 @@ function openBox(medId){
 function lineHtml(v){
   v=v||{};
   const chk=x=>v.read&&!(x>0)?' check':'';
-  return '<div class="line">'+
+  return '<div class="line"'+(v.id?' data-lid="'+esc(v.id)+'"':'')+'>'+
     '<label class="field wide"><span>Médicament</span><input class="l-name" list="medlist" autocomplete="off" placeholder="Nom et dosage" value="'+esc(v.name||'')+'"></label>'+
     (v.raw?'<p class="l-raw">Lu : \u00ab\u00a0'+esc(v.raw)+'\u00a0\u00bb</p>':'')+
     '<label class="field"><span>Unités par jour</span><input class="l-perday'+chk(v.perDay)+'" type="number" min="0" step="any" inputmode="decimal" placeholder="ex. 0,25 ou 2" value="'+(v.perDay>0?esc(v.perDay):'')+'"></label>'+
@@ -847,25 +889,28 @@ function lineHtml(v){
     '<button class="icon" data-act="del-line" aria-label="Retirer ce médicament">\u00d7</button></div>';
 }
 
-function openScript(){
+function openScript(id){
   pendingPhoto='';
-  const opts=state.members.map(m=>'<option value="'+m.id+'">'+esc(m.name)+'</option>').join('')+'<option value="__new">Nouvelle personne\u2026</option>';
+  const sc=id?state.scripts.find(x=>x.id===id):null;
+  sheet.dataset.script=sc?sc.id:'';
+  const opts=state.members.map(m=>'<option value="'+m.id+'"'+(sc&&sc.memberId===m.id?' selected':'')+'>'+esc(m.name)+'</option>').join('')+'<option value="__new">Nouvelle personne\u2026</option>';
+  const rows=sc?sc.lines.map(l=>{const m=state.meds.find(x=>x.id===l.medId);return m?lineHtml({id:l.id,name:m.name,perDay:l.perDay,days:l.days}):'';}).join(''):'';
   showSheet(
-    '<div class="sheet-h"><h2>Nouvelle ordonnance</h2><button class="icon" data-act="close-sheet" aria-label="Fermer">\u00d7</button></div>'+
+    '<div class="sheet-h"><h2>'+(sc?'Modifier l\u2019ordonnance':'Nouvelle ordonnance')+'</h2><button class="icon" data-act="close-sheet" aria-label="Fermer">\u00d7</button></div>'+
     '<div class="scan-btns"><button class="btn primary" data-act="doc-scan">Scanner l\u2019ordonnance</button>'+
     '<label class="btn photo-btn"><input id="s-photo" type="file" accept="image/*" class="sr">Choisir une photo</label></div>'+
     '<div class="docbox" hidden><video id="doccam" playsinline muted></video>'+
     '<div class="row-actions"><button class="btn primary" data-act="doc-shot">Lire l\u2019ordonnance</button><button class="btn" data-act="stop-scan">Annuler</button></div></div>'+
     '<p class="info" id="ocrMsg" role="status">L\u2019appli lit les médicaments sur ce téléphone : l\u2019image n\u2019est envoyée nulle part. Posez l\u2019ordonnance à plat, bien éclairée, et cadrez-la en entier.</p>'+
-    '<img id="s-preview" alt="Aperçu de l\u2019ordonnance" hidden>'+
+    '<img id="s-preview" alt="Aperçu de l\u2019ordonnance"'+(sc&&sc.photo?' src="'+sc.photo+'"':' hidden')+'>'+
     '<label class="field"><span>Pour qui ?</span><select id="s-member">'+opts+'</select></label>'+
     '<label class="field" id="newMemberWrap" hidden><span>Prénom</span><input id="s-newname" autocomplete="off"></label>'+
-    '<label class="field"><span>Début du traitement</span><input id="s-date" type="date" value="'+todayStr()+'"></label>'+
+    '<label class="field"><span>Début du traitement</span><input id="s-date" type="date" value="'+(sc?sc.date:todayStr())+'"></label>'+
     '<h2 style="margin-top:22px">Médicaments prescrits</h2>'+
-    '<div id="lines">'+lineHtml()+'</div>'+medNamesList()+
+    '<div id="lines">'+(rows||lineHtml())+'</div>'+medNamesList()+
     '<div class="row-actions"><button class="btn" data-act="add-line">Ajouter un médicament</button></div>'+
     '<p class="msg" id="formMsg" role="alert"></p>'+
-    '<button class="btn primary block" data-act="save-script">Enregistrer l\u2019ordonnance</button>'
+    '<button class="btn primary block" data-act="save-script">'+(sc?'Enregistrer les modifications':'Enregistrer l\u2019ordonnance')+'</button>'
   );
   syncNewMember();
 }
@@ -882,7 +927,11 @@ function openMed(id){
     '<label class="field"><span>Nom</span><input id="e-name" value="'+esc(m.name)+'"></label>'+
     '<label class="field"><span>Unités par boîte</span><input id="e-perbox" type="number" min="0" step="1" inputmode="numeric" value="'+esc(m.perBox||'')+'"></label>'+
     '<p class="msg" id="formMsg" role="alert"></p>'+
-    '<button class="btn primary block" data-act="save-med" data-med="'+m.id+'">Enregistrer</button>'
+    '<button class="btn primary block" data-act="save-med" data-med="'+m.id+'">Enregistrer</button>'+
+    (state.meds.length>1?'<h2 style="margin-top:26px">Regrouper avec un autre médicament</h2>'+
+      '<p class="muted">Pour deux noms du même médicament : les boîtes, les ordonnances et les prises sont réunies sous ce nom.</p>'+
+      '<label class="field"><span>Autre médicament</span><select id="e-merge">'+state.meds.filter(x=>x.id!==m.id).sort((a,b)=>a.name.localeCompare(b.name,'fr')).map(x=>'<option value="'+x.id+'">'+esc(x.name)+'</option>').join('')+'</select></label>'+
+      '<button class="btn block" data-act="merge-into" data-med="'+m.id+'" data-confirm="Confirmer le regroupement">Regrouper</button>':'')
   );
 }
 
@@ -1059,7 +1108,7 @@ async function decodeCanvas(c){
   try{
     const Z=await zxingReady;
     const d=c.getContext('2d').getImageData(0,0,c.width,c.height);
-    const r=await Z.readBarcodes(d,{formats:['DataMatrix','QRCode','EAN-13','Code128'],tryHarder:true,tryRotate:true,tryInvert:false,maxNumberOfSymbols:1});
+    const r=await Z.readBarcodes(d,{formats:['DataMatrix','QRCode','EAN-13','Code128'],tryHarder:true,tryRotate:true,tryInvert:true,maxNumberOfSymbols:1});
     if(r.length&&r[0].text)return r[0].text;
   }catch(e){}
   return '';
@@ -1546,6 +1595,7 @@ function saveMed(id){
 function saveScript(){
   const msg=$('#formMsg');
   const lines=$$('.line').map(r=>({
+    id:r.dataset.lid||'',
     name:$('.l-name',r).value.trim(),
     perDay:Number($('.l-perday',r).value),
     days:Number($('.l-days',r).value)
@@ -1563,13 +1613,20 @@ function saveScript(){
     let med=findMed(l.name,'');
     if(!med){med={id:uid(),name:l.name,cip13:'',perBox:0,countedAt:todayStr(),countedMs:Date.now(),batches:[]};state.meds.push(med);}
     else renameToSubst(med,[med.name,l.name]);
-    return {id:uid(),medId:med.id,perDay:l.perDay,days:l.days};
+    return {id:l.id||uid(),medId:med.id,perDay:l.perDay,days:l.days};
   });
-  state.scripts.push({id:uid(),memberId:memberId,date:$('#s-date').value||todayStr(),active:true,photo:pendingPhoto,lines:out});
+  const date=$('#s-date').value||todayStr();
+  const sc=sheet.dataset.script&&state.scripts.find(x=>x.id===sheet.dataset.script);
+  if(sc){
+    /* Le stock d'avant la modification est figé : seules les prises à venir changent. */
+    settle();state.meds.forEach(freeze);
+    sc.memberId=memberId;sc.date=date;sc.lines=out;
+    if(pendingPhoto)sc.photo=pendingPhoto;
+  }else state.scripts.push({id:uid(),memberId:memberId,date:date,active:true,photo:pendingPhoto,lines:out});
   pendingPhoto='';
-  tab='need';
+  tab=sc?'scripts':'need';
   closeSheet();
-  toast('Ordonnance enregistrée');
+  toast(sc?'Ordonnance modifiée':'Ordonnance enregistrée');
   commit();
   window.scrollTo({top:0});
 }
@@ -1603,6 +1660,7 @@ function act(a,el){
   settle();
   switch(a){
     case 'open-script':openScript();break;
+    case 'edit-script':openScript(d.id);break;
     case 'open-box':openBox(d.med);break;
     case 'edit-med':openMed(d.med);break;
     case 'close-sheet':closeSheet();break;
@@ -1623,7 +1681,7 @@ function act(a,el){
     case 'save-script':saveScript();break;
     case 'take':{
       const s=state.scripts.find(x=>x.id===d.script);const l=s&&s.lines.find(x=>x.id===d.line);
-      if(l)addIntake(l.medId,l.id,takeStep(l),s.memberId);
+      if(l)addIntake(l.medId,l.id,d.half?Math.min(0.5,takeStep(l)):takeStep(l),s.memberId);
       break;
     }
     case 'untake':{
@@ -1634,6 +1692,17 @@ function act(a,el){
     }
     case 'del-intake':state.intakes=state.intakes.filter(k=>k.id!==d.id);commit();toast('Prise annulée');break;
     case 'open-adhoc':openAdhoc();break;
+    case 'merge-pair':
+    case 'merge-into':{
+      const a=state.meds.find(x=>x.id===(d.a||d.med)),b=state.meds.find(x=>x.id===(d.b||($('#e-merge')||{}).value));
+      if(!a||!b||a===b)break;
+      /* garde le nom le plus complet (celui qui porte le dosage) */
+      const first=a.id===d.med||/\d/.test(a.name)>=/\d/.test(b.name)?a:b;
+      const t=mergeGroup([first,first===a?b:a],false);
+      closeSheet();toast('Regroupé sous « '+t.name+' ». Chaque lot garde son nom d\u2019origine.');commit();
+      break;
+    }
+    case 'not-same':state.notSame.push([d.a,d.b].sort().join('|'));commit();break;
     case 'save-adhoc':{
       const u=Number($('#a-units').value);
       if(!(u>0)){$('#formMsg').textContent='Indiquez le nombre d\u2019unités prises.';break;}
@@ -1677,7 +1746,7 @@ function act(a,el){
       break;
     case 'import':$('#import-file').click();break;
     case 'wipe':
-      state={members:[],meds:[],scripts:[],intakes:[]};openMeds.clear();
+      state={members:[],meds:[],scripts:[],intakes:[],notSame:[]};openMeds.clear();
       toast('Données effacées');commit();break;
   }
 }
